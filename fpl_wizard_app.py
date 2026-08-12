@@ -11,7 +11,8 @@ import plotly.express as px
 # ============================================================
 # CONFIG
 # ============================================================
-REPO_ROOT = r"."
+# Using relative path so it works perfectly on Streamlit Community Cloud
+REPO_ROOT = "."
 SEASON = "2025-2026"
 TOUR_NAME = "Premier League"
 NUM_GW = 38
@@ -33,8 +34,14 @@ def num_col(df, names):
 # ============================================================
 @st.cache_data(show_spinner="Loading and building large player datasets (this will be cached)...")
 def load_data():
-    root = os.path.join(REPO_ROOT, "data", SEASON)
+    # Resolve the data folder dynamically based on where the script is running
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.join(script_dir, "data", SEASON)
     
+    # Fallback to current working directory if script_dir lacks the data folder
+    if not os.path.exists(os.path.join(root, "players.csv")):
+        root = os.path.join(REPO_ROOT, "data", SEASON)
+        
     if not os.path.exists(os.path.join(root, "players.csv")):
         return pd.DataFrame(), pd.DataFrame()
         
@@ -236,25 +243,25 @@ def load_data():
                     is_home = False
                 else:
                     if not player_gw_row.empty and "opponent_team" in player_gw_row.columns:
-                        opp_ids_raw = player_gw_row["opponent_team"].values[0]
-                        opp_ids = []
-                        if isinstance(opp_ids_raw, str):
-                            try:
-                                parsed = ast.literal_eval(opp_ids_raw)
-                                opp_ids = parsed if isinstance(parsed, list) else [int(opp_ids_raw)]
-                            except:
-                                opp_ids = [int(opp_ids_raw)]
-                        elif pd.notna(opp_ids_raw):
-                            opp_ids = [int(opp_ids_raw)]
+                        opp_id_raw = player_gw_row["opponent_team"].iloc[0]
+                        try:
+                            if isinstance(opp_id_raw, str):
+                                parsed = ast.literal_eval(opp_id_raw)
+                                opp_id = parsed[0] if isinstance(parsed, list) and len(parsed) > 0 else int(opp_id_raw)
+                            else:
+                                opp_id = int(opp_id_raw)
                             
-                        opp_team_codes = teams[teams["id"].isin(opp_ids)]["code"].tolist()
-                        
-                        if h_code in opp_team_codes:
-                            opp_code = h_code
-                            is_home = False
-                        elif a_code in opp_team_codes:
-                            opp_code = a_code
-                            is_home = True
+                            opp_codes_df = teams[teams["id"] == opp_id]["code"]
+                            if not opp_codes_df.empty:
+                                target_opp_code = opp_codes_df.iloc[0]
+                                if h_code == target_opp_code:
+                                    opp_code = h_code
+                                    is_home = False
+                                elif a_code == target_opp_code:
+                                    opp_code = a_code
+                                    is_home = True
+                        except Exception:
+                            pass
                 
                 if opp_code is not None and opp_code in tbc.index:
                     opp_team = tbc.loc[opp_code]
@@ -286,7 +293,11 @@ def load_data():
                     opp_parts.append(f"{o} ({h})" if h else o)
                 opp_text = " / ".join(opp_parts)
                 avg_fdr = int(round(np.mean(fdrs)))
-                mins_text = "&prime; / ".join(per_match_mins) + "&prime;" if len(opp_parts) > 1 else f"{per_match_mins[0]}&prime;"
+                # Secure string replacing prime symbol with HTML entity
+                if len(opp_parts) > 1:
+                    mins_text = "&prime; / ".join(per_match_mins) + "&prime;"
+                else:
+                    mins_text = f"{per_match_mins[0]}&prime;"
             else:
                 opp_text = ""
                 avg_fdr = np.nan
@@ -420,17 +431,27 @@ def make_fixtures_html(df, ids, dark, green, yellow, orange, delivery_mode, deli
     def cell_text(opp, fdr):
         if not opp: return "&mdash;"
         text = html.escape(str(opp))
+        # Use safe HTML entity for stars to prevent websocket unicode chunking issues
         return text if pd.isna(fdr) else f"{text} {'&#9733;'*int(fdr)}"
 
     table_id = f"{syncGroup}Fixtures"
-    out = [f"<div class='wrap'><table id='{table_id}' class='fixtures-table'><thead><tr>"]
     
-    out.append("<th class='p'><div class='sth'>")
-    out.append(f"<div class='nm' onclick=\"sortSyncTables(this.closest('th'), 'fixtures', 'alpha', '{syncGroup}')\" style='cursor:pointer' title='Sort by Name'>Player &#8597;</div>")
-    out.append(f"<div class='mt' onclick=\"sortSyncTables(this.closest('th'), 'fixtures', 'metric', '{syncGroup}')\" style='cursor:pointer' title='Sort by {html.escape(metric_name)}'>{html.escape(metric_name)} &#8597;</div>")
+    # We reconstruct the entire HTML cleanly as a flat string map to prevent injection issues.
+    out = []
+    out.append("<div class='table-container'>")
+    out.append(f"<table id='{table_id}'><thead><tr>")
+    
+    # The sticky player columns
+    out.append("<th class='sticky-col left-col'>")
+    out.append(f"<div class='head-inner'>")
+    out.append(f"<div class='sort-btn left-sort' onclick=\"sortSyncTables(this.closest('th'), 'alpha')\" title='Sort by Name'>Player &#8597;</div>")
+    out.append(f"<div class='sort-btn right-sort' onclick=\"sortSyncTables(this.closest('th'), 'metric')\" title='Sort by {html.escape(metric_name)}'>{html.escape(metric_name)} &#8597;</div>")
     out.append("</div></th>")
 
-    out.extend([f"<th>GW{x}</th>" for x in gws])
+    # The GW headers
+    for x in gws:
+        out.append(f"<th>GW{x}</th>")
+        
     out.append("</tr></thead><tbody>")
 
     colors = {0: "#000000", 1: "#006400", 2: "#009c00", 3: "#b4b400", 4: "#d47a00", 5: "#b00000"}
@@ -438,11 +459,15 @@ def make_fixtures_html(df, ids, dark, green, yellow, orange, delivery_mode, deli
     for pid in ids:
         pname = html.escape(str(names.get(pid, "Unknown")))
         mval = html.escape(str(metric_dict.get(pid, "")))
-        out.append(f"<tr data-pid='{pid}'><td class='n'><div class='std'><div class='nm'>{pname}</div><div class='mt'>{mval}</div></div></td>")
+        out.append(f"<tr data-pid='{pid}'>")
+        
+        # Row sticky headers
+        out.append(f"<td class='sticky-col left-col'><div class='cell-inner'><div class='nm'>{pname}</div><div class='mt'>{mval}</div></div></td>")
+        
         for gw in gws:
             x = lookup.get((pid, gw))
             if x is None:
-                out.append("<td class='c' style='background:#20232b;'></td>")
+                out.append("<td style='background:#20232b;'></td>")
                 continue
             
             bucket = perf_bucket(x["points"], int(x["total_minutes"]), x["status"], dark, green, yellow, orange)
@@ -451,89 +476,122 @@ def make_fixtures_html(df, ids, dark, green, yellow, orange, delivery_mode, deli
             
             status_val = x['status']
             if status_val == "SUB":
-                status_disp = ", <span style='color: #000000; background-color: #ffffff; padding: 0px 3px; border-radius: 3px; font-weight: 900;'>SUB</span>"
+                status_disp = ", <span style='color:#000; background:#fff; padding:0px 2px; border-radius:2px; font-weight:bold;'>SUB</span>"
             elif status_val:
                 status_disp = f", {status_val}"
             else:
                 status_disp = ""
 
+            # mins_text already uses safe html entity for prime ′
             stats_line = f"{x['mins_text']} / {pts} pts{status_disp}"
 
-            tr_html = "<div class='tr-badge'>DGW</div>" if x.get("is_double", False) else ("<div class='tr-badge'>BGW</div>" if x.get("is_blank", False) else "")
+            tr_html = "<div class='badge-tr'>DGW</div>" if x.get("is_double", False) else ("<div class='badge-tr'>BGW</div>" if x.get("is_blank", False) else "")
             
             br_tags = []
             if x.get("cs", 0) > 0 and x.get("total_minutes", 0) > 0: br_tags.append("CS")
             if x.get("defcons_pts", 0) > 0 and x.get("total_minutes", 0) > 0: br_tags.append("DC")
-            br_html = f"<div class='br-badge'>{' / '.join(br_tags)}</div>" if br_tags else ""
+            br_html = f"<div class='badge-br'>{' / '.join(br_tags)}</div>" if br_tags else ""
 
             bl_tags = []
             goals = int(x.get("goals", 0))
             assists = int(x.get("assists", 0))
             if goals > 0 and x.get("total_minutes", 0) > 0: 
+                # Use robust HTML Entity for Soccer Ball
                 bl_tags.append(f"<span>{'&#9917;'*goals}</span>")
             if assists > 0 and x.get("total_minutes", 0) > 0: 
+                # Use robust HTML Entity for Dart/Assist
                 bl_tags.append(f"<span>{'&#127919;'*assists}</span>")
                 
-            bl_html = f"<div class='bl-badge'>{''.join(bl_tags)}</div>" if bl_tags else ""
+            bl_html = f"<div class='badge-bl'>{''.join(bl_tags)}</div>" if bl_tags else ""
 
-            out.append(f"<td class='c' style='background:{bg};'><div class='c-in'><span class='a'>{cell_text(x['opp'], x['fdr'])}</span><span class='b'>{stats_line}</span></div>{tr_html}{bl_html}{br_html}</td>")
+            out.append(f"<td style='background:{bg};'><div class='c-data'><span class='a'>{cell_text(x['opp'], x['fdr'])}</span><span class='b'>{stats_line}</span></div>{tr_html}{bl_html}{br_html}</td>")
         out.append("</tr>")
     out.append("</tbody></table></div>")
     
+    # Fully reconstructed CSS grid that enforces STRICT boundaries for cells so text/backgrounds never float out of place.
     css = """
     <style>
-    html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0e1117; color:white; font-family:Arial; }
-    .wrap { width:100%; height:100vh; overflow:auto; position:relative; box-sizing:border-box; padding-bottom:20px; }
-    table { border-collapse:separate; border-spacing:0; min-width:100%; width:max-content; table-layout:fixed; }
-    th, td { border:1px solid #353946; border-top:none; border-left:none; padding:0; margin:0; box-sizing:border-box; }
-    thead th { border-top:1px solid #353946; border-bottom:2px solid #353946; }
-    .fixtures-table th { position:sticky; top:0; z-index:5; background:#1b1f29; min-width:145px; width:145px; height:42px; text-align:center;}
-    .fixtures-table th.p { position:sticky; left:0; z-index:7; background:#1b1f29; min-width:260px; width:260px; border-right:2px solid #353946; }
-    .fixtures-table td.n { position:sticky; left:0; z-index:4; background:#0e1117; min-width:260px; width:260px; border-right:2px solid #353946; }
-    .sth { display:flex; height:100%; align-items:center; }
-    .std { display:flex; height:100%; align-items:center; }
-    .nm { flex:1; min-width:160px; padding-left:12px; text-align:left; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px; color:#f0f2f6; }
-    .mt { width:100px; min-width:100px; text-align:center; border-left:1px solid #353946; font-size:12px; color:#ccc; font-weight:bold; height:100%; display:flex; align-items:center; justify-content:center; }
-    td.c { min-width:145px; height:52px; position:relative; padding:3px; }
-    .c-in { display:flex; flex-direction:column; height:100%; justify-content:center; align-items:center; }
-    .a { font-weight:bold; font-size:11px; white-space:nowrap; }
-    .b { font-size:10px; color:#eee; white-space:nowrap; }
-    sup { font-size:8px; position:relative; top:-.3em; margin-left:2px; }
-    .br-badge { position:absolute; bottom:2px; right:3px; font-size:8px; font-weight:bold; color:rgba(255,255,255,0.8); line-height:1; }
-    .bl-badge { position:absolute; bottom:2px; left:3px; font-size:8px; font-weight:bold; color:rgba(255,255,255,0.8); line-height:1; display:flex; gap:3px; }
-    .tr-badge { position:absolute; top:2px; right:3px; font-size:8px; font-weight:bold; color:#000; background-color:#fff; padding:0 3px; border-radius:2px; line-height:1.2; }
-    .wrap::-webkit-scrollbar { width:14px; height:14px; }
-    .wrap::-webkit-scrollbar-thumb { background:#5b6270; border-radius:8px; border:3px solid #0e1117; }
+    :root { --border-color: #353946; --bg-dark: #0e1117; --bg-head: #1b1f29; }
+    html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:var(--bg-dark); color:white; font-family:sans-serif; }
+    
+    /* The outer wrapper that scrolls */
+    .table-container { width:100%; height:100vh; overflow:auto; padding-bottom:20px; box-sizing:border-box; }
+    .table-container::-webkit-scrollbar { width:12px; height:12px; }
+    .table-container::-webkit-scrollbar-thumb { background:#5b6270; border-radius:6px; border:2px solid var(--bg-dark); }
+    
+    table { border-collapse: separate; border-spacing: 0; min-width: 100%; table-layout: fixed; }
+    
+    /* Lock the cells so their content never leaks */
+    th, td { 
+        border-right: 1px solid var(--border-color); 
+        border-bottom: 1px solid var(--border-color); 
+        padding: 0; margin: 0; position: relative; box-sizing: border-box; 
+        vertical-align: middle; text-align: center;
+        overflow: hidden; /* Force clipping */
+    }
+    
+    /* General columns */
+    th { height: 42px; min-width: 145px; width: 145px; background: var(--bg-head); font-size: 13px; position: sticky; top: 0; z-index: 5; border-top: 1px solid var(--border-color); }
+    td { height: 52px; min-width: 145px; width: 145px; }
+
+    /* The sticky first column */
+    th.sticky-col { position: sticky; left: 0; top: 0; z-index: 10; min-width: 260px; width: 260px; background: var(--bg-head); border-right: 2px solid var(--border-color); }
+    td.sticky-col { position: sticky; left: 0; z-index: 4; min-width: 260px; width: 260px; background: var(--bg-dark); border-right: 2px solid var(--border-color); }
+
+    /* First column layout wrappers */
+    .head-inner { display: flex; height: 100%; width: 100%; align-items: center; }
+    .cell-inner { display: flex; height: 100%; width: 100%; align-items: center; }
+    
+    /* The Player Name part */
+    .nm { flex: 1; padding: 0 10px; text-align: left; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: #f0f2f6; }
+    .sort-btn.left-sort { flex: 1; padding: 0 10px; text-align: left; cursor: pointer; user-select: none; }
+    
+    /* The Metric part */
+    .mt { width: 90px; min-width: 90px; text-align: center; border-left: 1px solid var(--border-color); font-size: 12px; color: #ccc; font-weight: bold; height: 100%; display: flex; align-items: center; justify-content: center; }
+    .sort-btn.right-sort { width: 90px; min-width: 90px; text-align: center; border-left: 1px solid var(--border-color); cursor: pointer; user-select: none; }
+
+    /* The Fixture Data Cells */
+    .c-data { display: flex; flex-direction: column; height: 100%; width: 100%; justify-content: center; align-items: center; padding: 2px; box-sizing: border-box; }
+    .a { font-weight: bold; font-size: 11px; white-space: nowrap; line-height: 1.2; }
+    .b { font-size: 10px; color: #eee; white-space: nowrap; line-height: 1.2; }
+    
+    /* Badges */
+    .badge-tr { position: absolute; top: 2px; right: 3px; font-size: 8px; font-weight: bold; color: #000; background: #fff; padding: 0 3px; border-radius: 2px; line-height: 1.2; z-index: 2; }
+    .badge-bl { position: absolute; bottom: 2px; left: 3px; font-size: 9px; display: flex; gap: 3px; z-index: 2; }
+    .badge-br { position: absolute; bottom: 2px; right: 3px; font-size: 8px; font-weight: bold; color: rgba(255,255,255,0.8); line-height: 1; z-index: 2; }
     </style>
     """
+    
     js = """
     <script>
     var sortDirs = {};
-    function sortSyncTables(thElement, tableType, subType, syncGroup) {
-        var colIndex = thElement.cellIndex;
-        var table = document.getElementById(syncGroup + 'Fixtures');
-        if (!table) return;
-        var tbody = table.getElementsByTagName('tbody')[0];
-        var rows = Array.from(tbody.getElementsByTagName('tr'));
-        var colIdentifier = thElement.innerText.trim();
-        var dirKey = syncGroup + '_' + colIdentifier;
+    function sortSyncTables(thElement, subType) {
+        var table = thElement.closest('table');
+        var tbody = table.querySelector('tbody');
+        var rows = Array.from(tbody.querySelectorAll('tr'));
+        var colIndex = thElement.closest('th').cellIndex;
+        
+        var dirKey = colIndex + '_' + subType;
         var newDir = (sortDirs[dirKey] === 'desc') ? 'asc' : 'desc';
         sortDirs[dirKey] = newDir;
+        
         rows.sort(function(a, b) {
-            var cellX = a.getElementsByTagName('td')[colIndex];
-            var cellY = b.getElementsByTagName('td')[colIndex];
-            var valX = cellX ? cellX.querySelector('.nm') ? cellX.querySelector(subType === 'alpha' ? '.nm' : '.mt').innerText.trim() : cellX.innerText : '';
-            var valY = cellY ? cellY.querySelector('.nm') ? cellY.querySelector(subType === 'alpha' ? '.nm' : '.mt').innerText.trim() : cellY.innerText : '';
-            valX = valX.replace(/[^0-9.-]/g, '');
-            valY = valY.replace(/[^0-9.-]/g, '');
-            var numX = parseFloat(valX);
-            var numY = parseFloat(valY);
-            var isNumX = !isNaN(numX);
-            var isNumY = !isNaN(numY);
-            if (isNumX && isNumY) {
-                return (newDir === 'asc') ? (numX - numY) : (numY - numX);
+            var cellA = a.children[colIndex];
+            var cellB = b.children[colIndex];
+            
+            var valA = cellA.querySelector(subType === 'alpha' ? '.nm' : '.mt').innerText.trim();
+            var valB = cellB.querySelector(subType === 'alpha' ? '.nm' : '.mt').innerText.trim();
+            
+            // Clean values for numeric sorting
+            var cleanA = valA.replace(/[^0-9.-]/g, '');
+            var cleanB = valB.replace(/[^0-9.-]/g, '');
+            var numA = parseFloat(cleanA);
+            var numB = parseFloat(cleanB);
+            
+            if (!isNaN(numA) && !isNaN(numB)) {
+                return (newDir === 'asc') ? (numA - numB) : (numB - numA);
             } else {
-                return (newDir === 'asc') ? valX.localeCompare(valY) : valY.localeCompare(valX);
+                return (newDir === 'asc') ? valA.localeCompare(valB) : valB.localeCompare(valA);
             }
         });
         rows.forEach(function(row) { tbody.appendChild(row); });
@@ -861,7 +919,7 @@ with tab_fixtures:
         for _, r in filtered_m.iterrows():
             val = r[target_col]
             if sort_metric_name == "Cost":
-                metric_dict[r.player_id] = f"{val:.1f}m"
+                metric_dict[r.player_id] = f"£{val:.1f}m"
             elif sort_metric_name in ["Delivery %", "Consistency %", "Stability %", "CS %", "DefCon %", "xDelivery %"]:
                 metric_dict[r.player_id] = f"{val:.1f}%"
             elif sort_metric_name in ["Total Points", "Matches", "Starts", "Avg Mins", "Goals", "Assists", "Bonus", "CS Pts", "DefCons", "CS+DC Pts"]:
