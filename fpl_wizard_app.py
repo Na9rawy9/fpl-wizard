@@ -1,19 +1,22 @@
 import os
 import ast
+import re
 import html
 import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+import plotly.express as px
 
 # ============================================================
 # CONFIG
 # ============================================================
+REPO_ROOT = r"C:\Users\OMAR\Desktop\FPL\FPL-Core-Insights-main"
 SEASON = "2025-2026"
 TOUR_NAME = "Premier League"
 NUM_GW = 38
 
-st.set_page_config(page_title="FPL Wizard Mobile", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="FPL Wizard", layout="wide", initial_sidebar_state="expanded")
 
 # ============================================================
 # UTILS
@@ -28,21 +31,15 @@ def num_col(df, names):
 # ============================================================
 # DATA LOADING & AGGREGATION
 # ============================================================
-@st.cache_data(show_spinner="Loading and building player datasets (this will be cached)...")
+@st.cache_data(show_spinner="Loading and building large player datasets (this will be cached)...")
 def load_data():
-    repo_root = os.getcwd()
-    target_data_dir = None
+    root = os.path.join(REPO_ROOT, "data", SEASON)
     
-    for dirpath, _, filenames in os.walk(repo_root):
-        if "players.csv" in filenames and "teams.csv" in filenames:
-            target_data_dir = dirpath
-            break
-            
-    if not target_data_dir:
+    if not os.path.exists(os.path.join(root, "players.csv")):
         return pd.DataFrame(), pd.DataFrame()
         
-    players = pd.read_csv(os.path.join(target_data_dir, "players.csv"))
-    teams = pd.read_csv(os.path.join(target_data_dir, "teams.csv"))
+    players = pd.read_csv(os.path.join(root, "players.csv"))
+    teams = pd.read_csv(os.path.join(root, "teams.csv"))
 
     players["team_code_internal"] = players["team_code"] if "team_code" in players.columns else players["team"]
     
@@ -53,36 +50,25 @@ def load_data():
         players["position"] = players["position"].astype(str).str.upper()
         players["position"] = players["position"].replace({'GOALKEEPER': 'GKP', 'DEFENDER': 'DEF', 'MIDFIELDER': 'MID', 'FORWARD': 'FWD'})
 
-    tour_dir = None
-    for dirpath, dirnames, _ in os.walk(repo_root):
-        if TOUR_NAME in dirnames or f"GW1" in dirnames:
-            if "GW1" in dirnames:
-                tour_dir = dirpath
-            else:
-                tour_dir = os.path.join(dirpath, TOUR_NAME)
-            break
-            
     ml, pl, gl = [], [], []
-    
-    if tour_dir:
-        for gw in range(1, NUM_GW + 1):
-            p = os.path.join(tour_dir, f"GW{gw}")
-            m_path = os.path.join(p, "matches.csv")
-            pm_path = os.path.join(p, "playermatchstats.csv")
-            g_path = os.path.join(p, "player_gameweek_stats.csv")
-    
-            if os.path.exists(m_path):
-                m = pd.read_csv(m_path)
-                m["gameweek"] = gw
-                ml.append(m)
-            if os.path.exists(pm_path):
-                pm = pd.read_csv(pm_path)
-                pm["gameweek"] = gw
-                pl.append(pm)
-            if os.path.exists(g_path):
-                g = pd.read_csv(g_path)
-                g["gameweek"] = gw
-                gl.append(g)
+    for gw in range(1, NUM_GW + 1):
+        p = os.path.join(root, "By Tournament", TOUR_NAME, f"GW{gw}")
+        m_path = os.path.join(p, "matches.csv")
+        pm_path = os.path.join(p, "playermatchstats.csv")
+        g_path = os.path.join(p, "player_gameweek_stats.csv")
+
+        if os.path.exists(m_path):
+            m = pd.read_csv(m_path)
+            m["gameweek"] = gw
+            ml.append(m)
+        if os.path.exists(pm_path):
+            pm = pd.read_csv(pm_path)
+            pm["gameweek"] = gw
+            pl.append(pm)
+        if os.path.exists(g_path):
+            g = pd.read_csv(g_path)
+            g["gameweek"] = gw
+            gl.append(g)
 
     matches = pd.concat(ml, ignore_index=True) if ml else pd.DataFrame()
     pms = pd.concat(pl, ignore_index=True) if pl else pd.DataFrame()
@@ -98,15 +84,10 @@ def load_data():
     pgw = pgw[pgw.id.isin(ids)]
 
     strength_col = "elo" if "elo" in teams.columns else "strength"
-    if not teams.empty and strength_col in teams.columns:
-        lo, hi = teams[strength_col].min(), teams[strength_col].max()
-    else:
-        lo, hi = 1, 5
-        
-    tbc = teams.set_index("code") if not teams.empty else pd.DataFrame()
+    lo, hi = teams[strength_col].min(), teams[strength_col].max()
+    tbc = teams.set_index("code")
 
     def to_fdr(strength):
-        if pd.isna(strength) or hi == lo: return 3
         return max(1, min(5, 1 + int((strength - lo) / max(hi - lo, 1e-9) * 5)))
 
     stat_cols = [x for x in [
@@ -245,56 +226,83 @@ def load_data():
                 h_code = mr.home_team
                 a_code = mr.away_team
                 opp_code = None
+                is_home = None
                 
                 if h_code == p.team_code_internal:
                     opp_code = a_code
+                    is_home = True
                 elif a_code == p.team_code_internal:
                     opp_code = h_code
+                    is_home = False
                 else:
                     if not player_gw_row.empty and "opponent_team" in player_gw_row.columns:
-                        opp_id_raw = player_gw_row["opponent_team"].iloc[0]
-                        try:
-                            if isinstance(opp_id_raw, str):
-                                parsed = ast.literal_eval(opp_id_raw)
-                                opp_id = parsed[0] if isinstance(parsed, list) and len(parsed) > 0 else int(opp_id_raw)
-                            else:
-                                opp_id = int(opp_id_raw)
+                        opp_ids_raw = player_gw_row["opponent_team"].values[0]
+                        opp_ids = []
+                        if isinstance(opp_ids_raw, str):
+                            try:
+                                parsed = ast.literal_eval(opp_ids_raw)
+                                opp_ids = parsed if isinstance(parsed, list) else [int(opp_ids_raw)]
+                            except:
+                                opp_ids = [int(opp_ids_raw)]
+                        elif pd.notna(opp_ids_raw):
+                            opp_ids = [int(opp_ids_raw)]
                             
-                            opp_codes_df = teams[teams["id"] == opp_id]["code"]
-                            if not opp_codes_df.empty:
-                                target_opp_code = opp_codes_df.iloc[0]
-                                if h_code == target_opp_code:
-                                    opp_code = h_code
-                                elif a_code == target_opp_code:
-                                    opp_code = a_code
-                        except Exception:
-                            pass
+                        opp_team_codes = teams[teams["id"].isin(opp_ids)]["code"].tolist()
+                        
+                        if h_code in opp_team_codes:
+                            opp_code = h_code
+                            is_home = False
+                        elif a_code in opp_team_codes:
+                            opp_code = a_code
+                            is_home = True
                 
                 if opp_code is not None and opp_code in tbc.index:
                     opp_team = tbc.loc[opp_code]
+                    opp_name = opp_team.short_name
                     opp_str = opp_team.elo if "elo" in opp_team.index else opp_team.strength
                     fdr = to_fdr(opp_str)
                 else:
                     fdr = 3
+                    if opp_code is None:
+                        h_name = tbc.loc[h_code, "short_name"] if h_code in tbc.index else str(h_code)
+                        a_name = tbc.loc[a_code, "short_name"] if a_code in tbc.index else str(a_code)
+                        opp_name = f"{h_name} v {a_name}"
+                        is_home = None
+                    else:
+                        opp_name = "UNK"
 
+                opps.append(opp_name)
+                flags.append("H" if is_home is True else ("A" if is_home is False else ""))
                 fdrs.append(fdr)
 
-            avg_fdr = int(round(np.mean(fdrs))) if fdrs else np.nan
+                if "minutes_played" in mr:
+                    per_match_mins.append(str(int(mr.minutes_played)))
+                else:
+                    per_match_mins.append("0")
+
+            if opps:
+                opp_parts = []
+                for o, h in zip(opps, flags):
+                    opp_parts.append(f"{o} ({h})" if h else o)
+                opp_text = " / ".join(opp_parts)
+                avg_fdr = int(round(np.mean(fdrs)))
+                mins_text = "&prime; / ".join(per_match_mins) + "&prime;" if len(opp_parts) > 1 else f"{per_match_mins[0]}&prime;"
+            else:
+                opp_text = ""
+                avg_fdr = np.nan
+                mins_text = "0&prime;"
 
             records.append(dict(
                 player_id=p.player_id, web_name=p.web_name, gameweek=gw,
-                total_minutes=total_mins,
+                total_minutes=total_mins, mins_text=mins_text,
                 actual_matches=actual_matches, starts_count=starts_count,
-                points=pts, fdr=avg_fdr, price_m=p.price_m,
+                points=pts, status=status, opp=opp_text, fdr=avg_fdr, price_m=p.price_m,
                 position=pos, team_code_internal=p.team_code_internal,
                 cs=cs_val, defcons_pts=defcon_val, cs_fpl_points=cs_fpl_points,
                 goals=gw_goals, assists=gw_assists,
                 xg=raw_xg, xa=raw_xa, xgi=raw_xgi, xgc=raw_xgc, defcons_raw=raw_defcons,
+                is_blank=is_blank, is_double=is_double
             ))
-            
-    # CRITICAL FIX: Ensure `records` is not empty before parsing
-    if not records:
-        return pd.DataFrame(), players
 
     grid = pd.DataFrame(records).sort_values(["player_id", "gameweek"]).drop_duplicates(["player_id", "gameweek"])
     if not grid.empty:
@@ -319,6 +327,8 @@ def metrics(grid, players, base_grid_for_participation=None):
         total_points=("points", lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum())
     ).reset_index()
 
+    # Robust Stability Calculation: Interquartile Range (IQR) based standard deviation
+    # This ignores outliers (like a random 15-point haul) and accurately reflects regular baseline output
     def calc_robust_stability(group):
         pts = group['points'].dropna()
         if len(pts) < 2:
@@ -332,7 +342,7 @@ def metrics(grid, players, base_grid_for_participation=None):
             return 0.0
         return 100.0 * (mean / (mean + robust_std))
         
-    stability_df = grid[grid.total_minutes > 0].groupby("player_id").apply(calc_robust_stability, include_groups=False).rename("stability").reset_index()
+    stability_df = grid[grid.total_minutes > 0].groupby("player_id").apply(calc_robust_stability).rename("stability").reset_index()
     m = m.merge(stability_df, on="player_id", how="left").fillna({"stability": 0.0})
 
     m["avg_minutes_per_match"] = np.where(m.matches_played > 0, m.total_minutes / m.matches_played, 0)
@@ -347,7 +357,9 @@ def metrics(grid, players, base_grid_for_participation=None):
     m = m.merge(cs_hits, on="player_id", how="left").fillna({"cs_hits": 0})
     m = m.merge(defcon_hits, on="player_id", how="left").fillna({"defcon_hits": 0})
 
+    # Clean Sheet % logic: Zero out for attackers (MID/FWD) as they receive minimal/no CS points
     m["pct_cs"] = np.where((m.matches_played > 0) & (m.position.isin(["GKP", "DEF"])), m.cs_hits / m.matches_played * 100, 0)
+    
     m["pct_defcon"] = np.where(m.matches_played > 0, m.defcon_hits / m.matches_played * 100, 0)
 
     cs_defcons_points = grid.groupby("player_id").apply(lambda group: group["cs_fpl_points"].sum() + group["defcons_pts"].sum(), include_groups=False).rename("cs_defcons_points").reset_index()
@@ -391,81 +403,144 @@ def add_delivery_consistency(metric_df, grid_df, target, window):
     return metric_df.merge(consistency_df, on="player_id", how="left").fillna({"delivery_consistency": 0})
 
 
-# ============================================================
-# TRANSPOSED HTML TABLE RENDERER (Mobile Optimized)
-# ============================================================
-def render_transposed_html(df, metrics_def):
-    out = []
-    out.append("<div class='table-container'><table>")
+def make_fixtures_html(df, ids, dark, green, yellow, orange, delivery_mode, delivery_target, metric_dict, metric_name, syncGroup="main"):
+    names = df[["player_id", "web_name"]].drop_duplicates("player_id").set_index("player_id").web_name.to_dict()
+    gws = sorted(df.gameweek.unique())
+    lookup = df.drop_duplicates(["player_id", "gameweek"]).set_index(["player_id", "gameweek"]).to_dict("index")
+
+    def perf_bucket(pts, mins, status, dark, green, yellow, orange):
+        if status == "DNP" or mins == 0: return 0
+        if pd.isna(pts): return 5
+        if pts >= dark: return 1
+        if pts >= green: return 2
+        if pts >= yellow: return 3
+        if pts >= orange: return 4
+        return 5
+
+    def cell_text(opp, fdr):
+        if not opp: return "&mdash;"
+        text = html.escape(str(opp))
+        return text if pd.isna(fdr) else f"{text} {'&#9733;'*int(fdr)}"
+
+    table_id = f"{syncGroup}Fixtures"
+    out = [f"<div class='wrap'><table id='{table_id}' class='fixtures-table'><thead><tr>"]
     
-    out.append("<thead><tr>")
-    out.append("<th class='sticky-tl'>Metric</th>")
-    for _, r in df.iterrows():
-        out.append(f"<th class='sticky-t'>{html.escape(r['web_name'])}</th>")
-    out.append("</tr></thead>")
-    
-    out.append("<tbody>")
-    for m_key, m_label, m_type in metrics_def:
-        out.append("<tr>")
-        out.append(f"<td class='sticky-l'>{html.escape(m_label)}</td>")
-        
-        for _, r in df.iterrows():
-            val = r[m_key]
+    out.append("<th class='p'><div class='sth'>")
+    out.append(f"<div class='nm' onclick=\"sortSyncTables(this.closest('th'), 'fixtures', 'alpha', '{syncGroup}')\" style='cursor:pointer' title='Sort by Name'>Player &#8597;</div>")
+    out.append(f"<div class='mt' onclick=\"sortSyncTables(this.closest('th'), 'fixtures', 'metric', '{syncGroup}')\" style='cursor:pointer' title='Sort by {html.escape(metric_name)}'>{html.escape(metric_name)} &#8597;</div>")
+    out.append("</div></th>")
+
+    out.extend([f"<th>GW{x}</th>" for x in gws])
+    out.append("</tr></thead><tbody>")
+
+    colors = {0: "#000000", 1: "#006400", 2: "#009c00", 3: "#b4b400", 4: "#d47a00", 5: "#b00000"}
+
+    for pid in ids:
+        pname = html.escape(str(names.get(pid, "Unknown")))
+        mval = html.escape(str(metric_dict.get(pid, "")))
+        out.append(f"<tr data-pid='{pid}'><td class='n'><div class='std'><div class='nm'>{pname}</div><div class='mt'>{mval}</div></div></td>")
+        for gw in gws:
+            x = lookup.get((pid, gw))
+            if x is None:
+                out.append("<td class='c' style='background:#20232b;'></td>")
+                continue
             
-            if pd.isna(val):
-                disp = "-"
-            elif m_type == "string":
-                disp = html.escape(str(val))
-            elif m_type == "cost":
-                disp = f"&pound;{float(val):.1f}m"
-            elif m_type == "int":
-                disp = f"{int(val)}"
-            elif m_type == "float2":
-                disp = f"{float(val):.2f}"
-            elif m_type == "percent":
-                v = float(val)
-                disp = f"<div class='prog-bg'><div class='prog-fg' style='width: {min(100, max(0, v))}%;'></div></div><div>{v:.1f}%</div>"
+            bucket = perf_bucket(x["points"], int(x["total_minutes"]), x["status"], dark, green, yellow, orange)
+            bg = "#000000" if bucket == 0 else ("#009c00" if delivery_mode and not pd.isna(x["points"]) and x["points"] >= delivery_target else ("#b00000" if delivery_mode else colors[bucket]))
+            pts = "" if pd.isna(x["points"]) else int(x["points"])
+            
+            status_val = x['status']
+            if status_val == "SUB":
+                status_disp = ", <span style='color: #000000; background-color: #ffffff; padding: 0px 3px; border-radius: 3px; font-weight: 900;'>SUB</span>"
+            elif status_val:
+                status_disp = f", {status_val}"
             else:
-                disp = str(val)
+                status_disp = ""
+
+            stats_line = f"{x['mins_text']} / {pts} pts{status_disp}"
+
+            tr_html = "<div class='tr-badge'>DGW</div>" if x.get("is_double", False) else ("<div class='tr-badge'>BGW</div>" if x.get("is_blank", False) else "")
+            
+            br_tags = []
+            if x.get("cs", 0) > 0 and x.get("total_minutes", 0) > 0: br_tags.append("CS")
+            if x.get("defcons_pts", 0) > 0 and x.get("total_minutes", 0) > 0: br_tags.append("DC")
+            br_html = f"<div class='br-badge'>{' / '.join(br_tags)}</div>" if br_tags else ""
+
+            bl_tags = []
+            goals = int(x.get("goals", 0))
+            assists = int(x.get("assists", 0))
+            if goals > 0 and x.get("total_minutes", 0) > 0: 
+                bl_tags.append(f"<span>{'&#9917;'*goals}</span>")
+            if assists > 0 and x.get("total_minutes", 0) > 0: 
+                bl_tags.append(f"<span>{'&#127919;'*assists}</span>")
                 
-            out.append(f"<td>{disp}</td>")
+            bl_html = f"<div class='bl-badge'>{''.join(bl_tags)}</div>" if bl_tags else ""
+
+            out.append(f"<td class='c' style='background:{bg};'><div class='c-in'><span class='a'>{cell_text(x['opp'], x['fdr'])}</span><span class='b'>{stats_line}</span></div>{tr_html}{bl_html}{br_html}</td>")
         out.append("</tr>")
-        
     out.append("</tbody></table></div>")
     
     css = """
     <style>
-    :root { --border-color: #353946; --bg-dark: #0e1117; --bg-head: #1b1f29; }
-    html, body { margin:0; padding:0; background:var(--bg-dark); color:white; font-family:sans-serif; }
-    
-    .table-container { 
-        width: 100%; 
-        height: 80vh; 
-        overflow: auto; 
-        -webkit-overflow-scrolling: touch; 
-        box-sizing: border-box; 
-    }
-    
-    .table-container::-webkit-scrollbar { width: 6px; height: 6px; }
-    .table-container::-webkit-scrollbar-thumb { background: #5b6270; border-radius: 3px; }
-    
-    table { border-collapse: separate; border-spacing: 0; min-width: 100%; table-layout: fixed; }
-    th, td { border-right: 1px solid var(--border-color); border-bottom: 1px solid var(--border-color); padding: 8px 4px; box-sizing: border-box; vertical-align: middle; text-align: center; }
-    
-    th.sticky-t { position: sticky; top: 0; z-index: 10; background: var(--bg-head); border-top: 1px solid var(--border-color); font-size: 13px; font-weight: bold; width: 23vw; min-width: 75px; max-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    
-    th.sticky-tl { position: sticky; top: 0; left: 0; z-index: 12; background: var(--bg-head); border-top: 1px solid var(--border-color); width: 25vw; min-width: 90px; max-width: 140px; }
-    
-    td.sticky-l { position: sticky; left: 0; z-index: 9; background: var(--bg-head); text-align: left; font-size: 12px; font-weight: 600; width: 25vw; min-width: 90px; max-width: 140px; color: #f0f2f6; }
-    
-    td { font-size: 12px; color: #eee; width: 23vw; min-width: 75px; max-width: 120px; overflow: hidden; }
-    
-    .prog-bg { width: 100%; background: #333; height: 6px; border-radius: 3px; margin-bottom: 4px; overflow: hidden; }
-    .prog-fg { height: 100%; background: #009c00; border-radius: 3px; }
+    html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0e1117; color:white; font-family:Arial; }
+    .wrap { width:100%; height:100vh; overflow:auto; position:relative; box-sizing:border-box; padding-bottom:20px; }
+    table { border-collapse:separate; border-spacing:0; min-width:100%; width:max-content; table-layout:fixed; }
+    th, td { border:1px solid #353946; border-top:none; border-left:none; padding:0; margin:0; box-sizing:border-box; }
+    thead th { border-top:1px solid #353946; border-bottom:2px solid #353946; }
+    .fixtures-table th { position:sticky; top:0; z-index:5; background:#1b1f29; min-width:145px; width:145px; height:42px; text-align:center;}
+    .fixtures-table th.p { position:sticky; left:0; z-index:7; background:#1b1f29; min-width:260px; width:260px; border-right:2px solid #353946; }
+    .fixtures-table td.n { position:sticky; left:0; z-index:4; background:#0e1117; min-width:260px; width:260px; border-right:2px solid #353946; }
+    .sth { display:flex; height:100%; align-items:center; }
+    .std { display:flex; height:100%; align-items:center; }
+    .nm { flex:1; min-width:160px; padding-left:12px; text-align:left; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px; color:#f0f2f6; }
+    .mt { width:100px; min-width:100px; text-align:center; border-left:1px solid #353946; font-size:12px; color:#ccc; font-weight:bold; height:100%; display:flex; align-items:center; justify-content:center; }
+    td.c { min-width:145px; height:52px; position:relative; padding:3px; }
+    .c-in { display:flex; flex-direction:column; height:100%; justify-content:center; align-items:center; }
+    .a { font-weight:bold; font-size:11px; white-space:nowrap; }
+    .b { font-size:10px; color:#eee; white-space:nowrap; }
+    sup { font-size:8px; position:relative; top:-.3em; margin-left:2px; }
+    .br-badge { position:absolute; bottom:2px; right:3px; font-size:8px; font-weight:bold; color:rgba(255,255,255,0.8); line-height:1; }
+    .bl-badge { position:absolute; bottom:2px; left:3px; font-size:8px; font-weight:bold; color:rgba(255,255,255,0.8); line-height:1; display:flex; gap:3px; }
+    .tr-badge { position:absolute; top:2px; right:3px; font-size:8px; font-weight:bold; color:#000; background-color:#fff; padding:0 3px; border-radius:2px; line-height:1.2; }
+    .wrap::-webkit-scrollbar { width:14px; height:14px; }
+    .wrap::-webkit-scrollbar-thumb { background:#5b6270; border-radius:8px; border:3px solid #0e1117; }
     </style>
     """
-    
-    return css + "".join(out)
+    js = """
+    <script>
+    var sortDirs = {};
+    function sortSyncTables(thElement, tableType, subType, syncGroup) {
+        var colIndex = thElement.cellIndex;
+        var table = document.getElementById(syncGroup + 'Fixtures');
+        if (!table) return;
+        var tbody = table.getElementsByTagName('tbody')[0];
+        var rows = Array.from(tbody.getElementsByTagName('tr'));
+        var colIdentifier = thElement.innerText.trim();
+        var dirKey = syncGroup + '_' + colIdentifier;
+        var newDir = (sortDirs[dirKey] === 'desc') ? 'asc' : 'desc';
+        sortDirs[dirKey] = newDir;
+        rows.sort(function(a, b) {
+            var cellX = a.getElementsByTagName('td')[colIndex];
+            var cellY = b.getElementsByTagName('td')[colIndex];
+            var valX = cellX ? cellX.querySelector('.nm') ? cellX.querySelector(subType === 'alpha' ? '.nm' : '.mt').innerText.trim() : cellX.innerText : '';
+            var valY = cellY ? cellY.querySelector('.nm') ? cellY.querySelector(subType === 'alpha' ? '.nm' : '.mt').innerText.trim() : cellY.innerText : '';
+            valX = valX.replace(/[^0-9.-]/g, '');
+            valY = valY.replace(/[^0-9.-]/g, '');
+            var numX = parseFloat(valX);
+            var numY = parseFloat(valY);
+            var isNumX = !isNaN(numX);
+            var isNumY = !isNaN(numY);
+            if (isNumX && isNumY) {
+                return (newDir === 'asc') ? (numX - numY) : (numY - numX);
+            } else {
+                return (newDir === 'asc') ? valX.localeCompare(valY) : valY.localeCompare(valX);
+            }
+        });
+        rows.forEach(function(row) { tbody.appendChild(row); });
+    }
+    </script>
+    """
+    return css + "".join(out) + js
 
 
 # ============================================================
@@ -473,43 +548,70 @@ def render_transposed_html(df, metrics_def):
 # ============================================================
 
 master_grid, players = load_data()
-
 if master_grid.empty:
     st.error("No data found for the current season. Please check your data folders.")
     st.stop()
 
 st.title("🧙‍♂️ FPL Wizard")
-st.markdown("Mobile-Optimized Player Statistics")
+st.markdown("Advanced FPL Projections, Statistics & Comparisons")
 
-search_query = st.text_input("🔍 Search Player", "", help="Filter players by typing their name.")
+# --- SIDEBAR FILTERS ---
+with st.sidebar:
+    st.header("🎯 Core Filters")
+    
+    search_query = st.text_input("🔍 Search Player", "", help="Filter players by typing their name.")
+    
+    selected_positions = st.pills(
+        "Positions", 
+        ["GKP", "DEF", "MID", "FWD"], 
+        selection_mode="multi",
+        default=[],
+        help="Leave unselected to view all positions."
+    )
 
-colA, colB = st.columns(2)
-with colA:
-    selected_positions = st.pills("Positions", ["GKP", "DEF", "MID", "FWD"], selection_mode="multi", default=[])
-with colB:
     fdr_choices = ["FDR = 1", "FDR = 2", "FDR = 3", "FDR = 4", "FDR = 5"]
-    fdr_selection = st.pills("FDR Filter", fdr_choices, selection_mode="multi", default=[])
+    fdr_selection = st.pills(
+        "FDR Filter",
+        fdr_choices,
+        selection_mode="multi",
+        default=[],
+        help="Leave unselected to view Season-long data, or pick specific fixture difficulties (1-5)."
+    )
 
-price_min = players['price_m'].min() if not players.empty else 3.5
-price_max = players['price_m'].max() if not players.empty else 15.0
-price_range = st.slider("Price Range (£m)", float(price_min), float(price_max), (float(price_min), float(price_max)), 0.1, format="£%.1fm")
-
-with st.expander("⚙️ Advanced Filters (Teams, Mins, Participation, Targets)"):
+    price_min = players['price_m'].min() if not players.empty else 3.5
+    price_max = players['price_m'].max() if not players.empty else 15.0
+    price_range = st.slider(
+        "Price Range (£m)", 
+        min_value=float(price_min), 
+        max_value=float(price_max), 
+        value=(float(price_min), float(price_max)), 
+        step=0.1,
+        format="£%.1fm"
+    )
+    
     teams_list = sorted(master_grid.team_short.dropna().unique())
-    selected_teams = st.multiselect("Teams", teams_list, default=[])
-    
-    use_mins = st.checkbox("Average Minutes Per Match", False)
-    avg_mins = st.slider("Min Avg Minutes", 0, 90, 60, disabled=not use_mins)
-    
-    use_part = st.checkbox("Participation Across GWs", False)
-    part_pct = st.slider("Min Participation %", 0, 100, 75, disabled=not use_part)
-    
-    use_starts = st.checkbox("Starts / Participations", False)
-    starts_pct = st.slider("Min Starts %", 0, 100, 75, disabled=not use_starts)
+    selected_teams = st.multiselect(
+        "Teams", 
+        teams_list, 
+        default=[],
+        help="Leave empty to display all teams."
+    )
     
     st.divider()
-    target = st.number_input("Delivery Target Points", -10, 30, 4, 1)
-    window = st.number_input("Consistency Window (GWs)", 2, 10, 3, 1)
+    
+    with st.expander("⏱️ Playing Time Thresholds", expanded=False):
+        use_mins = st.checkbox("Average Minutes Per Match", False, help="Filter out players who average fewer minutes per match than the selected threshold.")
+        avg_mins = st.slider("Min Avg Minutes", 0, 90, 60, disabled=not use_mins)
+        
+        use_part = st.checkbox("Participation Across GWs", False, help="Filter out players who have appeared in fewer than the selected percentage of the Gameweeks (calculated based on available matches matching your active FDR filter).")
+        part_pct = st.slider("Min Participation %", 0, 100, 75, disabled=not use_part)
+        
+        use_starts = st.checkbox("Starts / Participations", False, help="Filter out players who start fewer than the selected percentage of their played matches.")
+        starts_pct = st.slider("Min Starts %", 0, 100, 75, disabled=not use_starts)
+        
+    with st.expander("🎯 Delivery Targets", expanded=False):
+        target = st.number_input("Delivery Target Points", -10, 30, 4, 1, help="Points needed in a Gameweek or rolling window to count as a delivery.")
+        window = st.number_input("Consistency Window (GWs)", 2, 10, 3, 1, help="Number of rolling Gameweeks (e.g. 3 evaluates GW1-3, GW2-4...).")
 
 
 # --- APPLY GLOBAL FDR FILTER ---
@@ -558,46 +660,242 @@ if use_starts:
     filtered_m = filtered_m[filtered_m.start_percent >= starts_pct]
 
 if filtered_m.empty:
-    st.warning("No players match these filters.")
+    st.warning("No players match these filters. (Note: Using the Participation % filter alongside an FDR filter requires the player to have participated in enough games OF THAT SPECIFIC FDR).")
     st.stop()
 
-# --- DEFINE METRICS FOR TRANSPOSED TABLE ---
-metrics_def = [
-    ("team_short", "Team", "string"),
-    ("position", "Pos", "string"),
-    ("price_m", "Cost", "cost"),
-    ("total_points", "Total Pts", "int"),
-    ("matches_played", "Matches", "int"),
-    ("starts", "Starts", "int"),
-    ("avg_points_per_match", "Avg Pts/M", "float2"),
-    ("avg_minutes_per_match", "Avg Mins", "int"),
-    ("pct_delivery", "Delivery %", "percent"),
-    ("delivery_consistency", "Consistency %", "percent"),
-    ("stability", "Stability %", "percent"),
-    ("xg_per_90", "xG/90", "float2"),
-    ("xa_per_90", "xA/90", "float2"),
-    ("xgi_per_90", "xGI/90", "float2"),
-    ("xgc_per_90", "xGC/90", "float2"),
-    ("defcon_per_90", "DefCon/90", "float2"),
-    ("pct_cs", "CS %", "percent"),
-    ("pct_defcon", "DefCon %", "percent"),
-    ("xdelivery", "xDelivery %", "percent"),
-    ("goals", "Goals", "int"),
-    ("assists_sort", "Assists", "int"),
-    ("bonus_points", "Bonus", "int"),
-    ("clean_sheets_pts", "CS Pts", "int"),
-    ("defcons", "DefCons", "int"),
-    ("cs_defcons_points", "CS+DC Pts", "int")
-]
+# --- MAIN TABS ---
+tab_stat, tab_compare, tab_fixtures = st.tabs([
+    "📊 Advanced Statistics", 
+    "⚖️ Player Radar Comparison",
+    "📅 Player Fixtures"
+])
 
-sort_options = {m_label: m_key for m_key, m_label, _ in metrics_def if m_key not in ["team_short", "position"]}
-st.markdown("### 📊 Player Statistics")
+shared_column_config = {
+    "web_name": st.column_config.TextColumn("Player Name", width="medium"),
+    "team_short": st.column_config.TextColumn("Team", width="small", help="Players Team"),
+    "position": st.column_config.TextColumn("Pos", width="small", help="Player Position (GKP, DEF, MID, FWD)"),
+    "price_m": st.column_config.NumberColumn("Cost", format="£%.1fm", width="small", help="Current FPL Cost"),
+    "pct_delivery": st.column_config.ProgressColumn(
+        "Delivery %", format="%.1f%%", min_value=0, max_value=100, 
+        help="Percentage of played matches where the player reached the delivery target."
+    ),
+    "delivery_consistency": st.column_config.ProgressColumn(
+        "Consistency %", format="%.1f%%", min_value=0, max_value=100, 
+        help="Percentage of rolling gameweek windows where the delivery target was met."
+    ),
+    "stability": st.column_config.ProgressColumn(
+        "Stability %", format="%.1f%%", min_value=0, max_value=100, 
+        help="Measures how stable the player's points are, ignoring extreme outliers (based on Interquartile Range)."
+    ),
+    "total_points": st.column_config.NumberColumn("Total Pts", format="%d", help="Total FPL points scored by the player."),
+    "avg_points_per_match": st.column_config.NumberColumn("Avg Pts/M", format="%.2f", help="Average points scored per match played."),
+    "xg_per_90": st.column_config.NumberColumn("xG/90", format="%.2f", help="Expected Goals per 90 minutes played."),
+    "xa_per_90": st.column_config.NumberColumn("xA/90", format="%.2f", help="Expected Assists per 90 minutes played."),
+    "xgi_per_90": st.column_config.NumberColumn("xGI/90", format="%.2f", help="Expected Goal Involvements (xG + xA) per 90 minutes played."),
+    "xgc_per_90": st.column_config.NumberColumn("xGC/90", format="%.2f", help="Expected Goals Conceded per 90 minutes played."),
+    "defcon_per_90": st.column_config.NumberColumn("DefCon/90", format="%.2f", help="Raw Defensive Contributions per 90 minutes played."),
+    "pct_cs": st.column_config.NumberColumn("CS %", format="%.1f%%", help="Percentage of played matches where the player kept a Clean Sheet."),
+    "pct_defcon": st.column_config.NumberColumn("DefCon %", format="%.1f%%", help="Percentage of played matches where the player registered a Defensive Contribution."),
+    "xdelivery": st.column_config.NumberColumn("xDelivery %", format="%.1f%%", help="Expected Delivery proportion of total points coming from deliveries."),
+    "matches_played": st.column_config.NumberColumn("Matches", format="%d", help="Total games participated in."),
+    "starts": st.column_config.NumberColumn("Starts", format="%d", help="Total games played as a starter."),
+    "avg_minutes_per_match": st.column_config.NumberColumn("Avg Mins", format="%d", help="Average minutes played per match."),
+    "goals": st.column_config.NumberColumn("Goals", format="%d", help="Total goals scored."),
+    "assists_sort": st.column_config.NumberColumn("Assists", format="%d", help="Total assists provided."),
+    "bonus_points": st.column_config.NumberColumn("Bonus", format="%d", help="Total FPL bonus points accumulated."),
+    "clean_sheets_pts": st.column_config.NumberColumn("CS Pts", format="%d", help="Total FPL points earned from Clean Sheets."),
+    "defcons": st.column_config.NumberColumn("DefCons", format="%d", help="Total defensive contribution points earned."),
+    "cs_defcons_points": st.column_config.NumberColumn("CS+DC Pts", format="%d", help="Total points earned specifically from Clean Sheets and DefCons."),
+}
 
-sort_choice = st.selectbox("Sort Players By:", list(sort_options.keys()), index=list(sort_options.keys()).index("Total Pts"))
+with tab_stat:
+    st.subheader(f"📊 Player Statistics ({len(filtered_m)} players)")
+    
+    display_cols = [
+        "web_name", "team_short", "position", "price_m", 
+        "pct_delivery", "delivery_consistency", "stability",
+        "total_points", "matches_played", "starts", 
+        "avg_points_per_match", "avg_minutes_per_match", 
+        "xg_per_90", "xa_per_90", "xgi_per_90", "xgc_per_90", "defcon_per_90", 
+        "pct_cs", "pct_defcon", "xdelivery", "goals", "assists_sort", "bonus_points", 
+        "clean_sheets_pts", "defcons", "cs_defcons_points"
+    ]
+    
+    st.dataframe(
+        filtered_m[display_cols].sort_values("total_points", ascending=False),
+        use_container_width=True,
+        hide_index=True,
+        column_config=shared_column_config,
+        height=600
+    )
 
-# Sort the dataframe BEFORE generating the transposed HTML
-ordered_m = filtered_m.sort_values(sort_options[sort_choice], ascending=False)
 
-# Generate and inject custom HTML
-html_payload = render_transposed_html(ordered_m, metrics_def)
-components.html(html_payload, height=800, scrolling=False)
+with tab_compare:
+    st.subheader("⚖️ Visual Player Comparison")
+    
+    compare_players = st.multiselect(
+        "Select up to 6 players to compare", 
+        options=filtered_m.web_name.tolist(),
+        default=filtered_m.sort_values("total_points", ascending=False).web_name.head(3).tolist() if not filtered_m.empty else [],
+        max_selections=6,
+        help="Use this dropdown to build a list of players to compare on the radar charts below."
+    )
+    
+    if compare_players:
+        comp_df = filtered_m[filtered_m.web_name.isin(compare_players)].copy()
+        
+        col1, col2 = st.columns(2)
+        
+        def plot_radar(df, metrics_list, title, name_map):
+            norm_df = df[['web_name'] + metrics_list].copy()
+            for col in metrics_list:
+                max_val = filtered_m[col].max() if filtered_m[col].max() > 0 else 1
+                norm_df[col] = norm_df[col] / max_val
+                
+            melt_df = norm_df.melt(id_vars=['web_name'], value_vars=metrics_list, var_name='Metric', value_name='Score')
+            melt_df['Metric'] = melt_df['Metric'].map(name_map)
+            
+            fig = px.line_polar(
+                melt_df, 
+                r='Score', 
+                theta='Metric', 
+                color='web_name', 
+                line_close=True,
+                markers=True,
+                title=title,
+                template="plotly_dark"
+            )
+            # Position the legend completely to the left
+            fig.update_layout(
+                polar=dict(radialaxis=dict(visible=False, range=[0, 1])),
+                legend=dict(
+                    title_text="",
+                    orientation="v",
+                    yanchor="middle",
+                    y=0.5,
+                    xanchor="right",
+                    x=-0.1
+                ),
+                margin=dict(l=120, r=20, t=40, b=20)
+            )
+            return fig
+
+        with col1:
+            off_metrics = ['avg_points_per_match', 'pct_delivery', 'delivery_consistency', 'xg_per_90', 'xa_per_90']
+            off_map = {
+                'avg_points_per_match': 'Avg Pts/Match', 
+                'pct_delivery': '% Delivery', 
+                'delivery_consistency': '% Consistency', 
+                'xg_per_90': 'xG / 90',
+                'xa_per_90': 'xA / 90'
+            }
+            st.plotly_chart(plot_radar(comp_df, off_metrics, "Offensive Output", off_map), use_container_width=True)
+
+        with col2:
+            def_metrics = ['avg_points_per_match', 'pct_delivery', 'delivery_consistency', 'pct_cs', 'defcon_per_90']
+            def_map = {
+                'avg_points_per_match': 'Avg Pts/Match', 
+                'pct_delivery': '% Delivery', 
+                'delivery_consistency': '% Consistency', 
+                'pct_cs': '% Clean Sheets',
+                'defcon_per_90': 'DefCon / 90'
+            }
+            st.plotly_chart(plot_radar(comp_df, def_metrics, "Defensive Output", def_map), use_container_width=True)
+
+    else:
+        st.info("Select players above to compare them visually.")
+
+
+with tab_fixtures:
+    st.subheader("📅 Player Fixtures")
+    st.markdown("Displays opponents color-coded by FDR with exact goals, assists, CS, and DGW/BGW markers.")
+    
+    # Note: Fixtures Tab explicitly uses the full un-filtered master_grid so that
+    # filtering by FDR in the sidebar doesn't arbitrarily wipe out columns in the fixture UI.
+    fix_grid = master_grid[master_grid.player_id.isin(filtered_m.player_id)].copy()
+    
+    if not fix_grid.empty:
+        colA, colB, colC = st.columns([2, 1, 1])
+        with colA:
+            sort_metric_name = st.selectbox(
+                "Metric Column:",
+                [
+                    "Total Points", "Cost", "Average Points Per Match", "Delivery %", "Consistency %", "Stability %",
+                    "xG/90", "xA/90", "xGI/90", "xGC/90", "DefCon/90", "CS %", "DefCon %",
+                    "xDelivery %", "Matches", "Starts", "Avg Mins", "Goals", "Assists", 
+                    "Bonus", "CS Pts", "DefCons", "CS+DC Pts"
+                ],
+                help="Select which metric appears next to the player's name in the fixtures table."
+            )
+        with colB:
+            delivery_mode = st.checkbox("Delivery Coloring Scheme", False, help="Colors cells green when the player reaches the delivery target, red otherwise.")
+        
+        metric_col_map = {
+            "Cost": "price_m",
+            "Total Points": "total_points",
+            "Average Points Per Match": "avg_points_per_match",
+            "Delivery %": "pct_delivery",
+            "Consistency %": "delivery_consistency",
+            "Stability %": "stability",
+            "xG/90": "xg_per_90",
+            "xA/90": "xa_per_90",
+            "xGI/90": "xgi_per_90",
+            "xGC/90": "xgc_per_90",
+            "DefCon/90": "defcon_per_90",
+            "CS %": "pct_cs",
+            "DefCon %": "pct_defcon",
+            "xDelivery %": "xdelivery",
+            "Matches": "matches_played",
+            "Starts": "starts",
+            "Avg Mins": "avg_minutes_per_match",
+            "Goals": "goals",
+            "Assists": "assists_sort",
+            "Bonus": "bonus_points",
+            "CS Pts": "clean_sheets_pts",
+            "DefCons": "defcons",
+            "CS+DC Pts": "cs_defcons_points"
+        }
+        
+        metric_dict = {}
+        target_col = metric_col_map[sort_metric_name]
+        for _, r in filtered_m.iterrows():
+            val = r[target_col]
+            if sort_metric_name == "Cost":
+                metric_dict[r.player_id] = f"{val:.1f}m"
+            elif sort_metric_name in ["Delivery %", "Consistency %", "Stability %", "CS %", "DefCon %", "xDelivery %"]:
+                metric_dict[r.player_id] = f"{val:.1f}%"
+            elif sort_metric_name in ["Total Points", "Matches", "Starts", "Avg Mins", "Goals", "Assists", "Bonus", "CS Pts", "DefCons", "CS+DC Pts"]:
+                metric_dict[r.player_id] = f"{int(val)}"
+            else:
+                metric_dict[r.player_id] = f"{val:.2f}"
+                
+        ordered_ids = filtered_m.sort_values(target_col, ascending=False).player_id.tolist()
+        
+        # scrolling=False inside components.html forces the internal `.wrap` CSS container to handle horizontal scrolling gracefully
+        html_code = make_fixtures_html(
+            df=fix_grid, 
+            ids=ordered_ids, 
+            dark=10, 
+            green=6, 
+            yellow=4, 
+            orange=1, 
+            delivery_mode=delivery_mode, 
+            delivery_target=target, 
+            metric_dict=metric_dict, 
+            metric_name=sort_metric_name
+        )
+        
+        components.html(html_code, height=720, scrolling=False)
+        
+        st.markdown("""
+        ---
+        **📊 Fixtures Legend & Acronyms:**
+        * **Opponent (H/A) ★**: The opposing team, whether it was Home (H) or Away (A), and the Fixture Difficulty Rating (FDR) represented by stars (1 to 5).
+        * **Minutes / Pts**: The top line inside a cell displays the minutes played and the exact FPL points earned.
+        * **SUB / DNP**: Player was a substitute (SUB) or Did Not Play (DNP).
+        * **DGW / BGW**: Double Gameweek (two matches in one GW) / Blank Gameweek (no match).
+        * **CS / DC**: Clean Sheet (CS) maintained / Defensive Contribution (DC) recorded.
+        * **⚽ / 🎯**: Each ball represents a single goal scored; each dartboard represents a single assist.
+        """)
+    else:
+        st.info("No fixtures available for the selected players.")
