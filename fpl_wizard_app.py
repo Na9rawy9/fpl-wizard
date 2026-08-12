@@ -42,10 +42,6 @@ def load_data():
         return pd.DataFrame(), pd.DataFrame()
         
     players = pd.read_csv(os.path.join(target_data_dir, "players.csv"))
-    # Ensure no duplicates in players manifest
-    if "player_id" in players.columns:
-        players = players.drop_duplicates("player_id")
-        
     teams = pd.read_csv(os.path.join(target_data_dir, "teams.csv"))
 
     players["team_code_internal"] = players["team_code"] if "team_code" in players.columns else players["team"]
@@ -94,14 +90,6 @@ def load_data():
 
     if pms.empty:
         return pd.DataFrame(), pd.DataFrame()
-
-    # Highly robust deduplication to prevent Matches > 38 bug caused by dirty data
-    if "match_id" in pms.columns:
-        pms = pms.drop_duplicates(subset=["player_id", "match_id"])
-    else:
-        pms = pms.drop_duplicates()
-        
-    pgw = pgw.drop_duplicates(subset=["id", "gameweek"]) if "id" in pgw.columns else pgw.drop_duplicates()
 
     ids = pms.groupby("player_id")["minutes_played"].sum()
     ids = ids[ids > 0].index
@@ -222,15 +210,91 @@ def load_data():
                 raw_xgc = 0
                 raw_defcons = 0
 
-            # More robust match counting to prevent exceeding 38 matches
-            if "match_id" in player_matches.columns:
-                actual_matches = player_matches[player_matches.minutes_played > 0].match_id.nunique()
-            else:
-                actual_matches = (player_matches.minutes_played > 0).sum()
-                
+            actual_matches = (player_matches.minutes_played > 0).sum() if not player_matches.empty else 0
             starts_count = 0
             if "start_min" in player_matches.columns and not player_matches.empty:
                 starts_count = ((player_matches.start_min == 0) & (player_matches.minutes_played > 0)).sum()
+                if starts_count > 0:
+                    status = ""
+                elif total_mins > 0:
+                    status = "SUB"
+                else:
+                    status = "DNP"
+            else:
+                if total_mins > 0:
+                    status = "SUB"
+                else:
+                    status = "DNP"
+
+            opps, flags, fdrs, per_match_mins = [], [], [], []
+            is_blank, is_double = False, False
+
+            if not player_matches.empty:
+                matches_to_process = player_matches.merge(ms, on="match_id", how="inner")
+            else:
+                matches_to_process = ms[(ms.home_team == p.team_code_internal) | (ms.away_team == p.team_code_internal)]
+
+            matches_to_process = matches_to_process.drop_duplicates("match_id")
+
+            if len(matches_to_process) == 0:
+                is_blank = True
+            elif len(matches_to_process) > 1:
+                is_double = True
+
+            for _, mr in matches_to_process.iterrows():
+                h_code = mr.home_team
+                a_code = mr.away_team
+                opp_code = None
+                
+                if h_code == p.team_code_internal:
+                    opp_code = a_code
+                elif a_code == p.team_code_internal:
+                    opp_code = h_code
+                else:
+                    if not player_gw_row.empty and "opponent_team" in player_gw_row.columns:
+                        opp_id_raw = player_gw_row["opponent_team"].iloc[0]
+                        try:
+                            if isinstance(opp_id_raw, str):
+                                parsed = ast.literal_eval(opp_id_raw)
+                                opp_id = parsed[0] if isinstance(parsed, list) and len(parsed) > 0 else int(opp_id_raw)
+                            else:
+                                opp_id = int(opp_id_raw)
+                            
+                            opp_codes_df = teams[teams["id"] == opp_id]["code"]
+                            if not opp_codes_df.empty:
+                                target_opp_code = opp_codes_df.iloc[0]
+                                if h_code == target_opp_code:
+                                    opp_code = h_code
+                                elif a_code == target_opp_code:
+                                    opp_code = a_code
+                        except Exception:
+                            pass
+                
+                if opp_code is not None and opp_code in tbc.index:
+                    opp_team = tbc.loc[opp_code]
+                    opp_str = opp_team.elo if "elo" in opp_team.index else opp_team.strength
+                    fdr = to_fdr(opp_str)
+                else:
+                    fdr = 3
+
+                fdrs.append(fdr)
+
+            avg_fdr = int(round(np.mean(fdrs))) if fdrs else np.nan
+
+            records.append(dict(
+                player_id=p.player_id, web_name=p.web_name, gameweek=gw,
+                total_minutes=total_mins,
+                actual_matches=actual_matches, starts_count=starts_count,
+                points=pts, fdr=avg_fdr, price_m=p.price_m,
+                position=pos, team_code_internal=p.team_code_internal,
+                cs=cs_val, defcons_pts=defcon_val, cs_fpl_points=cs_fpl_points,
+                goals=gw_goals, assists=gw_assists,
+                xg=raw_xg, xa=raw_xa, xgi=raw_xgi, xgc=raw_xgc, defcons_raw=raw_defcons,
+            ))
+            
+    # CRITICAL FIX: Ensure `records` is not empty before parsing
+    if not records:
+        return pd.DataFrame(), players
 
     grid = pd.DataFrame(records).sort_values(["player_id", "gameweek"]).drop_duplicates(["player_id", "gameweek"])
     if not grid.empty:
@@ -255,9 +319,6 @@ def metrics(grid, players, base_grid_for_participation=None):
         total_points=("points", lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum())
     ).reset_index()
 
-    # Cap matches_played at 38 (just in case of external data anomalies)
-    m["matches_played"] = m["matches_played"].clip(upper=38)
-
     def calc_robust_stability(group):
         pts = group['points'].dropna()
         if len(pts) < 2:
@@ -271,7 +332,7 @@ def metrics(grid, players, base_grid_for_participation=None):
             return 0.0
         return 100.0 * (mean / (mean + robust_std))
         
-    stability_df = grid[grid.total_minutes > 0].groupby("player_id").apply(calc_robust_stability).rename("stability").reset_index()
+    stability_df = grid[grid.total_minutes > 0].groupby("player_id").apply(calc_robust_stability, include_groups=False).rename("stability").reset_index()
     m = m.merge(stability_df, on="player_id", how="left").fillna({"stability": 0.0})
 
     m["avg_minutes_per_match"] = np.where(m.matches_played > 0, m.total_minutes / m.matches_played, 0)
@@ -335,7 +396,7 @@ def add_delivery_consistency(metric_df, grid_df, target, window):
 # ============================================================
 def render_transposed_html(df, metrics_def):
     out = []
-    out.append("<div class='table-container'><table id='stats-table'>")
+    out.append("<div class='table-container'><table>")
     
     out.append("<thead><tr>")
     out.append("<th class='sticky-tl'>Metric</th>")
@@ -344,10 +405,9 @@ def render_transposed_html(df, metrics_def):
     out.append("</tr></thead>")
     
     out.append("<tbody>")
-    for idx, (m_key, m_label, m_type) in enumerate(metrics_def):
+    for m_key, m_label, m_type in metrics_def:
         out.append("<tr>")
-        # Add sortCols onclick event to the metric header cell
-        out.append(f"<td class='sticky-l sortable-row' onclick='sortCols(this, {idx})' title='Click to sort columns by {m_label}'>{html.escape(m_label)} &#8597;</td>")
+        out.append(f"<td class='sticky-l'>{html.escape(m_label)}</td>")
         
         for _, r in df.iterrows():
             val = r[m_key]
@@ -378,106 +438,34 @@ def render_transposed_html(df, metrics_def):
     :root { --border-color: #353946; --bg-dark: #0e1117; --bg-head: #1b1f29; }
     html, body { margin:0; padding:0; background:var(--bg-dark); color:white; font-family:sans-serif; }
     
-    /* Highly responsive scroll container */
     .table-container { 
         width: 100%; 
-        height: 75vh; 
+        height: 80vh; 
         overflow: auto; 
         -webkit-overflow-scrolling: touch; 
         box-sizing: border-box; 
     }
     
-    /* Scrollbar styling */
     .table-container::-webkit-scrollbar { width: 6px; height: 6px; }
     .table-container::-webkit-scrollbar-thumb { background: #5b6270; border-radius: 3px; }
     
     table { border-collapse: separate; border-spacing: 0; min-width: 100%; table-layout: fixed; }
     th, td { border-right: 1px solid var(--border-color); border-bottom: 1px solid var(--border-color); padding: 8px 4px; box-sizing: border-box; vertical-align: middle; text-align: center; }
     
-    /* Header Row (Player Names) */
-    th.sticky-t { position: sticky; top: 0; z-index: 10; background: var(--bg-head); border-top: 1px solid var(--border-color); font-size: 13px; font-weight: bold; width: 23vw; min-width: 80px; max-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    th.sticky-t { position: sticky; top: 0; z-index: 10; background: var(--bg-head); border-top: 1px solid var(--border-color); font-size: 13px; font-weight: bold; width: 23vw; min-width: 75px; max-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     
-    /* Top Left Corner */
-    th.sticky-tl { position: sticky; top: 0; left: 0; z-index: 12; background: var(--bg-head); border-top: 1px solid var(--border-color); width: 26vw; min-width: 95px; max-width: 140px; }
+    th.sticky-tl { position: sticky; top: 0; left: 0; z-index: 12; background: var(--bg-head); border-top: 1px solid var(--border-color); width: 25vw; min-width: 90px; max-width: 140px; }
     
-    /* Left Column (Metric Names) */
-    td.sticky-l { position: sticky; left: 0; z-index: 9; background: var(--bg-head); text-align: left; font-size: 12px; font-weight: 600; width: 26vw; min-width: 95px; max-width: 140px; color: #f0f2f6; }
+    td.sticky-l { position: sticky; left: 0; z-index: 9; background: var(--bg-head); text-align: left; font-size: 12px; font-weight: 600; width: 25vw; min-width: 90px; max-width: 140px; color: #f0f2f6; }
     
-    /* Clickable Sortable Row Hover State */
-    td.sortable-row { cursor: pointer; transition: background 0.2s, color 0.2s; }
-    td.sortable-row:hover { background: #2c3140; color: #fff; }
+    td { font-size: 12px; color: #eee; width: 23vw; min-width: 75px; max-width: 120px; overflow: hidden; }
     
-    /* Data Cells */
-    td { font-size: 12px; color: #eee; width: 23vw; min-width: 80px; max-width: 120px; overflow: hidden; }
-    
-    /* Progress Bars CSS */
     .prog-bg { width: 100%; background: #333; height: 6px; border-radius: 3px; margin-bottom: 4px; overflow: hidden; }
     .prog-fg { height: 100%; background: #009c00; border-radius: 3px; }
     </style>
     """
     
-    js = """
-    <script>
-    var sortDirs = {};
-    function sortCols(triggerCell, rowIdx) {
-        var table = triggerCell.closest('table');
-        var tbody = table.querySelector('tbody');
-        var thead = table.querySelector('thead');
-        var targetRow = tbody.rows[rowIdx];
-        
-        var dirKey = 'row_' + rowIdx;
-        var newDir = (sortDirs[dirKey] === 'desc') ? 'asc' : 'desc';
-        sortDirs[dirKey] = newDir;
-        
-        var colData = [];
-        
-        // Loop through all cells in the clicked row, EXCEPT the first cell (the metric name)
-        for (var i = 1; i < targetRow.cells.length; i++) {
-            var cell = targetRow.cells[i];
-            var rawVal = cell.innerText || cell.textContent;
-            
-            // Clean value for number parsing
-            var cleanVal = rawVal.replace(/[^0-9.-]/g, '');
-            var num = parseFloat(cleanVal);
-            
-            colData.push({
-                index: i,
-                raw: rawVal,
-                num: num,
-                isNum: !isNaN(num) && cleanVal.length > 0
-            });
-        }
-        
-        // Sort the array of column objects
-        colData.sort(function(a, b) {
-            if (a.isNum && b.isNum) {
-                return (newDir === 'asc') ? (a.num - b.num) : (b.num - a.num);
-            } else {
-                return (newDir === 'asc') ? a.raw.localeCompare(b.raw) : b.raw.localeCompare(a.raw);
-            }
-        });
-        
-        // Apply the new order to ALL rows (Header + Body)
-        var allRows = Array.from(thead.rows).concat(Array.from(tbody.rows));
-        
-        allRows.forEach(function(row) {
-            var cells = Array.from(row.cells);
-            
-            // Remove all cells except the very first one (index 0)
-            while (row.cells.length > 1) {
-                row.deleteCell(1);
-            }
-            
-            // Re-append the stored cells in the newly sorted order
-            colData.forEach(function(col) {
-                row.appendChild(cells[col.index]);
-            });
-        });
-    }
-    </script>
-    """
-    
-    return css + "".join(out) + js
+    return css + "".join(out)
 
 
 # ============================================================
@@ -490,7 +478,6 @@ if master_grid.empty:
     st.error("No data found for the current season. Please check your data folders.")
     st.stop()
 
-# Filter integration explicitly pushed to the top of the UI
 st.title("🧙‍♂️ FPL Wizard")
 st.markdown("Mobile-Optimized Player Statistics")
 
@@ -603,21 +590,14 @@ metrics_def = [
     ("cs_defcons_points", "CS+DC Pts", "int")
 ]
 
-# Initially sort by Total Points internally
-ordered_m = filtered_m.sort_values("total_points", ascending=False)
-
+sort_options = {m_label: m_key for m_key, m_label, _ in metrics_def if m_key not in ["team_short", "position"]}
 st.markdown("### 📊 Player Statistics")
-st.caption("👈 Tap any metric name on the left to re-sort the players instantly!")
 
+sort_choice = st.selectbox("Sort Players By:", list(sort_options.keys()), index=list(sort_options.keys()).index("Total Pts"))
+
+# Sort the dataframe BEFORE generating the transposed HTML
+ordered_m = filtered_m.sort_values(sort_options[sort_choice], ascending=False)
+
+# Generate and inject custom HTML
 html_payload = render_transposed_html(ordered_m, metrics_def)
-components.html(html_payload, height=750, scrolling=False)
-
-# Add Glossary for mobile users below the table
-with st.expander("📖 Metric Glossary & Definitions"):
-    st.markdown("""
-    * **Delivery %**: The percentage of played matches where the player successfully reached your specified Delivery Target.
-    * **Consistency %**: Evaluates the player on a rolling Gameweek window. If they consistently average the target points across every window, they score highly here.
-    * **Stability %**: A measure of a player's baseline reliability. Calculated using the Interquartile Range to explicitly ignore extreme outliers (like a random 15-point haul on a normally 2-point player). A higher percentage means highly predictable returns.
-    * **xG / xA / xGC**: Expected Goals, Expected Assists, and Expected Goals Conceded (scaled per 90 minutes).
-    * **DefCon**: Defensive Contributions (e.g. saves, clearances, recoveries).
-    """)
+components.html(html_payload, height=800, scrolling=False)
