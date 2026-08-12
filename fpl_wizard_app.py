@@ -15,7 +15,8 @@ SEASON = "2025-2026"
 TOUR_NAME = "Premier League"
 NUM_GW = 38
 
-st.set_page_config(page_title="FPL Wizard", layout="wide", initial_sidebar_state="expanded")
+# Streamlit native responsive UI config
+st.set_page_config(page_title="FPL Wizard", layout="wide", initial_sidebar_state="auto")
 
 # ============================================================
 # UTILS
@@ -32,9 +33,6 @@ def num_col(df, names):
 # ============================================================
 @st.cache_data(show_spinner="Loading and building large player datasets (this will be cached)...")
 def load_data():
-    # VERY ROBUST FILE LOCATOR FOR CLOUD DEPLOYMENTS
-    # This will search your entire GitHub repository tree starting from the root folder 
-    # to find exactly where `players.csv` and the `By Tournament` folders are hidden.
     repo_root = os.getcwd()
     target_data_dir = None
     
@@ -44,7 +42,6 @@ def load_data():
             break
             
     if not target_data_dir:
-        # Failsafe: return empty if not found anywhere in the container
         return pd.DataFrame(), pd.DataFrame()
         
     players = pd.read_csv(os.path.join(target_data_dir, "players.csv"))
@@ -59,7 +56,6 @@ def load_data():
         players["position"] = players["position"].astype(str).str.upper()
         players["position"] = players["position"].replace({'GOALKEEPER': 'GKP', 'DEFENDER': 'DEF', 'MIDFIELDER': 'MID', 'FORWARD': 'FWD'})
 
-    # Find the matching "By Tournament" folder recursively as well, just in case it's one folder up or down
     tour_dir = None
     for dirpath, dirnames, _ in os.walk(repo_root):
         if TOUR_NAME in dirnames or f"GW1" in dirnames:
@@ -527,7 +523,7 @@ def make_fixtures_html(df, ids, dark, green, yellow, orange, delivery_mode, deli
         out.append("</tr>")
     out.append("</tbody></table></div>")
     
-    # Fully reconstructed CSS grid that enforces STRICT boundaries for cells so text/backgrounds never float out of place.
+    # CSS Updated to support smaller mobile device viewports
     css = """
     <style>
     :root { --border-color: #353946; --bg-dark: #0e1117; --bg-head: #1b1f29; }
@@ -535,7 +531,7 @@ def make_fixtures_html(df, ids, dark, green, yellow, orange, delivery_mode, deli
     
     /* The outer wrapper that scrolls */
     .table-container { width:100%; height:100vh; overflow:auto; padding-bottom:20px; box-sizing:border-box; }
-    .table-container::-webkit-scrollbar { width:12px; height:12px; }
+    .table-container::-webkit-scrollbar { width:8px; height:8px; } /* Slimmer scrollbars for mobile */
     .table-container::-webkit-scrollbar-thumb { background:#5b6270; border-radius:6px; border:2px solid var(--bg-dark); }
     
     table { border-collapse: separate; border-spacing: 0; min-width: 100%; table-layout: fixed; }
@@ -553,21 +549,32 @@ def make_fixtures_html(df, ids, dark, green, yellow, orange, delivery_mode, deli
     th { height: 42px; min-width: 145px; width: 145px; background: var(--bg-head); font-size: 13px; position: sticky; top: 0; z-index: 5; border-top: 1px solid var(--border-color); }
     td { height: 52px; min-width: 145px; width: 145px; }
 
-    /* The sticky first column */
-    th.sticky-col { position: sticky; left: 0; top: 0; z-index: 10; min-width: 260px; width: 260px; background: var(--bg-head); border-right: 2px solid var(--border-color); }
-    td.sticky-col { position: sticky; left: 0; z-index: 4; min-width: 260px; width: 260px; background: var(--bg-dark); border-right: 2px solid var(--border-color); }
+    /* The sticky first column is fully responsive based on viewport width */
+    th.sticky-col { position: sticky; left: 0; top: 0; z-index: 10; min-width: 150px; width: 30vw; max-width: 260px; background: var(--bg-head); border-right: 2px solid var(--border-color); }
+    td.sticky-col { position: sticky; left: 0; z-index: 4; min-width: 150px; width: 30vw; max-width: 260px; background: var(--bg-dark); border-right: 2px solid var(--border-color); }
 
     /* First column layout wrappers */
-    .head-inner { display: flex; height: 100%; width: 100%; align-items: center; }
-    .cell-inner { display: flex; height: 100%; width: 100%; align-items: center; }
+    .head-inner { display: flex; flex-direction: column; height: 100%; width: 100%; align-items: stretch; justify-content: space-evenly; }
+    .cell-inner { display: flex; flex-direction: column; height: 100%; width: 100%; align-items: stretch; justify-content: space-evenly; }
+    
+    @media (min-width: 600px) {
+        /* If tablet or desktop, put name and metric side by side */
+        .head-inner { flex-direction: row; align-items: center; }
+        .cell-inner { flex-direction: row; align-items: center; }
+    }
     
     /* The Player Name part */
-    .nm { flex: 1; padding: 0 10px; text-align: left; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: #f0f2f6; }
-    .sort-btn.left-sort { flex: 1; padding: 0 10px; text-align: left; cursor: pointer; user-select: none; }
+    .nm { flex: 1; padding: 2px 8px; text-align: left; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: #f0f2f6; }
+    .sort-btn.left-sort { flex: 1; padding: 2px 8px; text-align: left; cursor: pointer; user-select: none; font-size: 11px; }
     
     /* The Metric part */
-    .mt { width: 90px; min-width: 90px; text-align: center; border-left: 1px solid var(--border-color); font-size: 12px; color: #ccc; font-weight: bold; height: 100%; display: flex; align-items: center; justify-content: center; }
-    .sort-btn.right-sort { width: 90px; min-width: 90px; text-align: center; border-left: 1px solid var(--border-color); cursor: pointer; user-select: none; }
+    .mt { min-width: 50px; text-align: left; border-left: none; padding-left: 8px; font-size: 11px; color: #ccc; font-weight: bold; }
+    .sort-btn.right-sort { min-width: 50px; text-align: left; border-left: none; cursor: pointer; user-select: none; font-size: 10px; padding-left: 8px; }
+    
+    @media (min-width: 600px) {
+        .mt { width: 90px; min-width: 90px; text-align: center; border-left: 1px solid var(--border-color); font-size: 12px; display: flex; align-items: center; justify-content: center; padding-left: 0;}
+        .sort-btn.right-sort { width: 90px; min-width: 90px; text-align: center; border-left: 1px solid var(--border-color); font-size: 12px; padding-left: 0; }
+    }
 
     /* The Fixture Data Cells */
     .c-data { display: flex; flex-direction: column; height: 100%; width: 100%; justify-content: center; align-items: center; padding: 2px; box-sizing: border-box; }
@@ -758,10 +765,11 @@ if filtered_m.empty:
     st.stop()
 
 # --- MAIN TABS ---
+# For mobile layout, we drop the emojis from the tab titles to save space on small screens
 tab_stat, tab_compare, tab_fixtures = st.tabs([
-    "📊 Advanced Statistics", 
-    "⚖️ Player Radar Comparison",
-    "📅 Player Fixtures"
+    "Advanced Statistics", 
+    "Radar Comparison",
+    "Player Fixtures"
 ])
 
 shared_column_config = {
@@ -803,7 +811,7 @@ shared_column_config = {
 }
 
 with tab_stat:
-    st.subheader(f"📊 Player Statistics ({len(filtered_m)} players)")
+    st.markdown("### 📊 Player Statistics")
     
     display_cols = [
         "web_name", "team_short", "position", "price_m", 
@@ -825,7 +833,7 @@ with tab_stat:
 
 
 with tab_compare:
-    st.subheader("⚖️ Visual Player Comparison")
+    st.markdown("### ⚖️ Visual Player Comparison")
     
     compare_players = st.multiselect(
         "Select up to 6 players to compare", 
@@ -838,6 +846,8 @@ with tab_compare:
     if compare_players:
         comp_df = filtered_m[filtered_m.web_name.isin(compare_players)].copy()
         
+        # In a mobile view, columns map vertically anyway, but Streamlit forces 50/50 split width on tablets
+        # By not passing a strict fixed dimension to the plot we allow it to fill the mobile width naturally
         col1, col2 = st.columns(2)
         
         def plot_radar(df, metrics_list, title, name_map):
@@ -859,40 +869,40 @@ with tab_compare:
                 title=title,
                 template="plotly_dark"
             )
-            # Position the legend completely to the left
+            # Reconfigured legend for mobile devices (moving it to the bottom so it doesn't crush the chart horizontally)
             fig.update_layout(
                 polar=dict(radialaxis=dict(visible=False, range=[0, 1])),
                 legend=dict(
                     title_text="",
-                    orientation="v",
-                    yanchor="middle",
-                    y=0.5,
-                    xanchor="right",
-                    x=-0.1
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.2,
+                    xanchor="center",
+                    x=0.5
                 ),
-                margin=dict(l=120, r=20, t=40, b=20)
+                margin=dict(l=40, r=40, t=40, b=40)
             )
             return fig
 
         with col1:
             off_metrics = ['avg_points_per_match', 'pct_delivery', 'delivery_consistency', 'xg_per_90', 'xa_per_90']
             off_map = {
-                'avg_points_per_match': 'Avg Pts/Match', 
+                'avg_points_per_match': 'Avg Pts/M', 
                 'pct_delivery': '% Delivery', 
-                'delivery_consistency': '% Consistency', 
-                'xg_per_90': 'xG / 90',
-                'xa_per_90': 'xA / 90'
+                'delivery_consistency': '% Consist.', 
+                'xg_per_90': 'xG/90',
+                'xa_per_90': 'xA/90'
             }
             st.plotly_chart(plot_radar(comp_df, off_metrics, "Offensive Output", off_map), use_container_width=True)
 
         with col2:
             def_metrics = ['avg_points_per_match', 'pct_delivery', 'delivery_consistency', 'pct_cs', 'defcon_per_90']
             def_map = {
-                'avg_points_per_match': 'Avg Pts/Match', 
+                'avg_points_per_match': 'Avg Pts/M', 
                 'pct_delivery': '% Delivery', 
-                'delivery_consistency': '% Consistency', 
-                'pct_cs': '% Clean Sheets',
-                'defcon_per_90': 'DefCon / 90'
+                'delivery_consistency': '% Consist.', 
+                'pct_cs': '% CS',
+                'defcon_per_90': 'DefCon/90'
             }
             st.plotly_chart(plot_radar(comp_df, def_metrics, "Defensive Output", def_map), use_container_width=True)
 
@@ -901,15 +911,14 @@ with tab_compare:
 
 
 with tab_fixtures:
-    st.subheader("📅 Player Fixtures")
-    st.markdown("Displays opponents color-coded by FDR with exact goals, assists, CS, and DGW/BGW markers.")
+    st.markdown("### 📅 Player Fixtures")
+    st.markdown("<small>Displays opponents color-coded by FDR with exact goals, assists, CS, and DGW/BGW markers.</small>", unsafe_allow_html=True)
     
-    # Note: Fixtures Tab explicitly uses the full un-filtered master_grid so that
-    # filtering by FDR in the sidebar doesn't arbitrarily wipe out columns in the fixture UI.
     fix_grid = master_grid[master_grid.player_id.isin(filtered_m.player_id)].copy()
     
     if not fix_grid.empty:
-        colA, colB, colC = st.columns([2, 1, 1])
+        # Use a more mobile-friendly stacking mechanism for these controls
+        colA, colB = st.columns([1, 1])
         with colA:
             sort_metric_name = st.selectbox(
                 "Metric Column:",
@@ -922,7 +931,9 @@ with tab_fixtures:
                 help="Select which metric appears next to the player's name in the fixtures table."
             )
         with colB:
-            delivery_mode = st.checkbox("Delivery Coloring Scheme", False, help="Colors cells green when the player reaches the delivery target, red otherwise.")
+            # Add padding to align checkbox with the selectbox on desktop, but allow stacking on mobile
+            st.markdown("<div style='height: 32px;'></div>", unsafe_allow_html=True)
+            delivery_mode = st.checkbox("Delivery Coloring", False, help="Colors cells green when the player reaches the delivery target, red otherwise.")
         
         metric_col_map = {
             "Cost": "price_m",
@@ -965,7 +976,6 @@ with tab_fixtures:
                 
         ordered_ids = filtered_m.sort_values(target_col, ascending=False).player_id.tolist()
         
-        # scrolling=False inside components.html forces the internal `.wrap` CSS container to handle horizontal scrolling gracefully
         html_code = make_fixtures_html(
             df=fix_grid, 
             ids=ordered_ids, 
@@ -979,17 +989,16 @@ with tab_fixtures:
             metric_name=sort_metric_name
         )
         
-        components.html(html_code, height=720, scrolling=False)
+        components.html(html_code, height=650, scrolling=False)
         
-        st.markdown("""
-        ---
-        **📊 Fixtures Legend & Acronyms:**
-        * **Opponent (H/A) ★**: The opposing team, whether it was Home (H) or Away (A), and the Fixture Difficulty Rating (FDR) represented by stars (1 to 5).
-        * **Minutes / Pts**: The top line inside a cell displays the minutes played and the exact FPL points earned.
-        * **SUB / DNP**: Player was a substitute (SUB) or Did Not Play (DNP).
-        * **DGW / BGW**: Double Gameweek (two matches in one GW) / Blank Gameweek (no match).
-        * **CS / DC**: Clean Sheet (CS) maintained / Defensive Contribution (DC) recorded.
-        * **⚽ / 🎯**: Each ball represents a single goal scored; each dartboard represents a single assist.
-        """)
+        with st.expander("📊 Fixtures Legend & Acronyms"):
+            st.markdown("""
+            * **Opponent (H/A) ★**: The opposing team, whether it was Home (H) or Away (A), and the Fixture Difficulty Rating (FDR) represented by stars (1 to 5).
+            * **Minutes / Pts**: The top line inside a cell displays the minutes played and the exact FPL points earned.
+            * **SUB / DNP**: Player was a substitute (SUB) or Did Not Play (DNP).
+            * **DGW / BGW**: Double Gameweek (two matches in one GW) / Blank Gameweek (no match).
+            * **CS / DC**: Clean Sheet (CS) maintained / Defensive Contribution (DC) recorded.
+            * **⚽ / 🎯**: Each ball represents a single goal scored; each dartboard represents a single assist.
+            """)
     else:
         st.info("No fixtures available for the selected players.")
