@@ -33,7 +33,7 @@ def num_col(df, names):
 # ============================================================
 @st.cache_data(show_spinner="Loading and building large player datasets (this will be cached)...")
 def load_data():
-    root = os.path.join(REPO_ROOT, "data", SEASON)
+    root = os.path.join("./data", SEASON)
     
     if not os.path.exists(os.path.join(root, "players.csv")):
         return pd.DataFrame(), pd.DataFrame()
