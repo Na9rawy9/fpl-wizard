@@ -630,8 +630,8 @@ if master_grid.empty:
     st.error("No data found for the current season. Please check your data folders.")
     st.markdown("""
     **Debugging Help for Streamlit Cloud:**
-    The app is searching for the `players.csv` file inside a `data/2025-2026/` folder.
-    Make sure your GitHub repository structure looks exactly like this:
+    The app is searching for the `players.csv` file inside your GitHub repository.
+    Make sure your GitHub repository structure looks exactly like this (without `data` folder inside `fpl_wizard_app_modern2` if you didn't extract it out):
     ```
     fpl-wizard/
      ├── fpl_wizard_app_modern.py
